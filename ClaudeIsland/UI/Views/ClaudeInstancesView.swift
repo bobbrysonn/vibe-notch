@@ -36,56 +36,47 @@ struct ClaudeInstancesView: View {
 
     // MARK: - Instances List
 
-    /// Priority: active (approval/processing/compacting) > waitingForInput > idle
-    /// Secondary sort: by last user message date (stable - doesn't change when agent responds)
-    /// Note: approval requests stay in their date-based position to avoid layout shift
-    private var sortedInstances: [SessionState] {
-        sessionMonitor.instances.sorted { a, b in
-            let priorityA = phasePriority(a.phase)
-            let priorityB = phasePriority(b.phase)
-            if priorityA != priorityB {
-                return priorityA < priorityB
+    /// Sections in urgency order; within a section, the most recent state change first
+    private var sections: [(group: SessionGroup, sessions: [SessionState])] {
+        let grouped = Dictionary(grouping: sessionMonitor.instances, by: { $0.group })
+        return SessionGroup.allCases.compactMap { group in
+            guard let sessions = grouped[group], !sessions.isEmpty else { return nil }
+            let sorted = sessions.sorted { a, b in
+                if a.phaseChangedAt != b.phaseChangedAt {
+                    return a.phaseChangedAt > b.phaseChangedAt
+                }
+                return a.sessionId < b.sessionId
             }
-            // Sort by last user message date (more recent first)
-            // Fall back to lastActivity if no user messages yet
-            let dateA = a.lastUserMessageDate ?? a.lastActivity
-            let dateB = b.lastUserMessageDate ?? b.lastActivity
-            if dateA != dateB {
-                return dateA > dateB
-            }
-            // Tertiary sort by sessionId for deterministic ordering when dates tie
-            return a.sessionId < b.sessionId
-        }
-    }
-
-    /// Lower number = higher priority
-    /// Approval requests share priority with processing to maintain stable ordering
-    private func phasePriority(_ phase: SessionPhase) -> Int {
-        switch phase {
-        case .waitingForApproval, .processing, .compacting: return 0
-        case .waitingForInput: return 1
-        case .idle, .ended: return 2
+            return (group, sorted)
         }
     }
 
     private var instancesList: some View {
-        ScrollView(.vertical, showsIndicators: false) {
-            LazyVStack(spacing: 2) {
-                ForEach(sortedInstances) { session in
-                    InstanceRow(
-                        session: session,
-                        onFocus: { focusSession(session) },
-                        onChat: { openChat(session) },
-                        onArchive: { archiveSession(session) },
-                        onApprove: { approveSession(session) },
-                        onReject: { rejectSession(session) }
-                    )
-                    .id(session.stableId)
+        let showLastPrompt = sessionMonitor.instances.count <= 5
+        return TimelineView(.periodic(from: .now, by: 15)) { context in
+            ScrollView(.vertical, showsIndicators: false) {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(sections, id: \.group) { section in
+                        SessionSectionHeader(group: section.group)
+                        ForEach(section.sessions) { session in
+                            InstanceRow(
+                                session: session,
+                                now: context.date,
+                                showLastPrompt: showLastPrompt,
+                                onFocus: { focusSession(session) },
+                                onChat: { openChat(session) },
+                                onArchive: { archiveSession(session) },
+                                onApprove: { approveSession(session) },
+                                onReject: { rejectSession(session) }
+                            )
+                            .id(session.stableId)
+                        }
+                    }
                 }
+                .padding(.vertical, 4)
             }
-            .padding(.vertical, 4)
+            .scrollBounceBehavior(.basedOnSize)
         }
-        .scrollBounceBehavior(.basedOnSize)
     }
 
     // MARK: - Actions
@@ -119,10 +110,152 @@ struct ClaudeInstancesView: View {
     }
 }
 
+// MARK: - Grouping and Row Text
+
+enum SessionGroup: Int, CaseIterable, Hashable {
+    case needsYou, working, idle
+
+    var title: String {
+        switch self {
+        case .needsYou: return "NEEDS YOU"
+        case .working: return "WORKING"
+        case .idle: return "IDLE"
+        }
+    }
+}
+
+extension SessionState {
+    /// An AskUserQuestion is open; it can arrive as a permission request or only as a running tool
+    var hasOpenQuestionTool: Bool {
+        if case .waitingForApproval(let ctx) = phase {
+            return ctx.toolName == "AskUserQuestion"
+        }
+        return toolTracker.inProgress.values.contains { $0.name == "AskUserQuestion" }
+    }
+
+    var group: SessionGroup {
+        switch phase {
+        case .waitingForApproval:
+            return .needsYou
+        case .processing, .compacting:
+            return hasOpenQuestionTool ? .needsYou : .working
+        case .waitingForInput, .idle:
+            return conversationInfo.lastAssistantQuestion != nil ? .needsYou : .idle
+        case .ended:
+            return .idle
+        }
+    }
+
+    /// "project · branch", capped so a long branch name cannot push the title out
+    var projectLabel: String {
+        let label = conversationInfo.gitBranch.map { "\(projectName) · \($0)" } ?? projectName
+        guard label.count > 34 else { return label }
+        return String(label.prefix(20)) + "…" + String(label.suffix(13))
+    }
+
+    /// Line 2: what the session is asking or doing; `isAsk` marks text that needs the user
+    var activityLine: (text: String, isAsk: Bool) {
+        switch phase {
+        case .waitingForApproval(let ctx):
+            if ctx.toolName == "AskUserQuestion" {
+                return ("Asks: " + (Self.question(in: ctx) ?? "needs your input"), true)
+            }
+            let detail = Self.permissionDetail(ctx).map { " " + $0 } ?? ""
+            return ("Permission: " + MCPToolFormatter.formatToolName(ctx.toolName) + detail, true)
+        case .processing, .compacting:
+            if hasOpenQuestionTool {
+                let question = lastToolName == "AskUserQuestion" ? lastMessage : nil
+                return ("Asks: " + (question ?? "needs your input"), true)
+            }
+            if case .compacting = phase {
+                return ("Compacting…", false)
+            }
+            var text = currentStep
+            let running = subagentState.activeTasks.count
+            if running > 0 {
+                text += " · \(running) agent\(running == 1 ? "" : "s") running"
+            }
+            return (text, false)
+        case .waitingForInput, .idle, .ended:
+            if let question = conversationInfo.lastAssistantQuestion {
+                return ("Asks: " + question, true)
+            }
+            if let firstLine = conversationInfo.lastAssistantFirstLine {
+                return ("Done: " + firstLine, false)
+            }
+            return (phase == .ended ? "Ended" : "Idle", false)
+        }
+    }
+
+    private var currentStep: String {
+        switch lastMessageRole {
+        case "tool":
+            let tool = lastToolName ?? "Tool"
+            let detail = lastMessage ?? ""
+            switch tool {
+            case "Bash":
+                return detail.isEmpty ? "Bash" : detail
+            case "Task", "Agent":
+                return detail.isEmpty ? "Agent" : "Agent: " + detail
+            case "Read", "Write", "Edit", "MultiEdit", "NotebookEdit":
+                return detail.isEmpty ? tool : "\(tool): \(detail)"
+            default:
+                let name = MCPToolFormatter.formatToolName(tool)
+                return detail.isEmpty ? name : "\(name): \(detail)"
+            }
+        case "assistant":
+            return lastMessage ?? "Working…"
+        default:
+            return "Thinking…"
+        }
+    }
+
+    private static func question(in ctx: PermissionContext) -> String? {
+        guard let questions = ctx.toolInput?["questions"]?.value as? [Any],
+              let first = questions.first as? [String: Any] else { return nil }
+        return first["question"] as? String
+    }
+
+    private static func permissionDetail(_ ctx: PermissionContext) -> String? {
+        if ctx.toolName == "Bash",
+           let description = ctx.toolInput?["description"]?.value as? String,
+           !description.isEmpty {
+            return description
+        }
+        return ctx.formattedInput
+    }
+
+    static func elapsedLabel(since date: Date, now: Date) -> String {
+        let seconds = max(0, Int(now.timeIntervalSince(date)))
+        if seconds < 60 { return "\(seconds)s" }
+        if seconds < 3600 { return "\(seconds / 60)m" }
+        if seconds < 86400 { return "\(seconds / 3600)h" }
+        return "\(seconds / 86400)d"
+    }
+}
+
+// MARK: - Section Header
+
+struct SessionSectionHeader: View {
+    let group: SessionGroup
+
+    var body: some View {
+        Text(group.title)
+            .font(.system(size: 9.5, weight: .semibold))
+            .tracking(0.6)
+            .foregroundColor(group == .needsYou ? TerminalColors.amber.opacity(0.75) : .white.opacity(0.35))
+            .padding(.leading, 12)
+            .padding(.top, 8)
+            .padding(.bottom, 2)
+    }
+}
+
 // MARK: - Instance Row
 
 struct InstanceRow: View {
     let session: SessionState
+    let now: Date
+    let showLastPrompt: Bool
     let onFocus: () -> Void
     let onChat: () -> Void
     let onArchive: () -> Void
@@ -146,31 +279,13 @@ struct InstanceRow: View {
         return toolName == "AskUserQuestion"
     }
 
-    /// Status text based on session phase (fallback when no other content)
-    private var phaseStatusText: String {
-        switch session.phase {
-        case .processing:
-            return "Processing..."
-        case .compacting:
-            return "Compacting..."
-        case .waitingForInput:
-            return "Ready"
-        case .waitingForApproval:
-            return "Waiting for approval"
-        case .idle:
-            return "Idle"
-        case .ended:
-            return "Ended"
-        }
-    }
-
     var body: some View {
+        let activity = session.activityLine
+
         HStack(alignment: .center, spacing: 10) {
-            // State indicator on left
             stateIndicator
                 .frame(width: 14)
 
-            // Text content
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(session.displayTitle)
@@ -178,87 +293,43 @@ struct InstanceRow: View {
                         .foregroundColor(.white)
                         .lineLimit(1)
 
-                    // Token usage indicator
+                    Spacer(minLength: 8)
+
+                    Text(session.projectLabel)
+                        .font(.system(size: 10.5))
+                        .foregroundColor(.white.opacity(0.4))
+                        .lineLimit(1)
+                        .fixedSize()
+
                     if session.usage.totalTokens > 0 {
                         Text(session.usage.formattedTotal)
                             .font(.system(size: 10, weight: .medium, design: .monospaced))
-                            .foregroundColor(.white.opacity(0.3))
+                            .foregroundColor(.white.opacity(0.25))
+                            .fixedSize()
                     }
                 }
 
-                // Show tool call when waiting for approval, otherwise last activity
-                if isWaitingForApproval, let toolName = session.pendingToolName {
-                    // Show tool name in amber + input on same line
-                    HStack(spacing: 4) {
-                        Text(MCPToolFormatter.formatToolName(toolName))
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                            .foregroundColor(TerminalColors.amber.opacity(0.9))
-                        if isInteractiveTool {
-                            Text("Needs your input")
-                                .font(.system(size: 11))
-                                .foregroundColor(.white.opacity(0.5))
-                                .lineLimit(1)
-                        } else if let input = session.pendingToolInput {
-                            Text(input)
-                                .font(.system(size: 11))
-                                .foregroundColor(.white.opacity(0.5))
-                                .lineLimit(1)
-                        }
-                    }
-                } else if let role = session.lastMessageRole {
-                    switch role {
-                    case "tool":
-                        // Tool call - show tool name + input
-                        HStack(spacing: 4) {
-                            if let toolName = session.lastToolName {
-                                Text(MCPToolFormatter.formatToolName(toolName))
-                                    .font(.system(size: 11, weight: .medium, design: .monospaced))
-                                    .foregroundColor(.white.opacity(0.5))
-                            }
-                            if let input = session.lastMessage {
-                                Text(input)
-                                    .font(.system(size: 11))
-                                    .foregroundColor(.white.opacity(0.4))
-                                    .lineLimit(1)
-                            }
-                        }
-                    case "user":
-                        // User message - prefix with "You:"
-                        HStack(spacing: 4) {
-                            Text("You:")
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundColor(.white.opacity(0.5))
-                            if let msg = session.lastMessage {
-                                Text(msg)
-                                    .font(.system(size: 11))
-                                    .foregroundColor(.white.opacity(0.4))
-                                    .lineLimit(1)
-                            }
-                        }
-                    default:
-                        // Assistant message - just show text
-                        if let msg = session.lastMessage {
-                            Text(msg)
-                                .font(.system(size: 11))
-                                .foregroundColor(.white.opacity(0.4))
-                                .lineLimit(1)
-                        }
-                    }
-                } else if let lastMsg = session.lastMessage {
-                    Text(lastMsg)
+                HStack(spacing: 6) {
+                    Text(activity.text)
                         .font(.system(size: 11))
-                        .foregroundColor(.white.opacity(0.4))
+                        .foregroundColor(activity.isAsk ? TerminalColors.amber.opacity(0.9) : .white.opacity(0.5))
                         .lineLimit(1)
-                } else {
-                    // Fallback: show phase-based status when no other content
-                    Text(phaseStatusText)
-                        .font(.system(size: 11))
-                        .foregroundColor(.white.opacity(0.4))
+
+                    Spacer(minLength: 8)
+
+                    Text(SessionState.elapsedLabel(since: session.phaseChangedAt, now: now))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.35))
+                        .fixedSize()
+                }
+
+                if showLastPrompt, let prompt = session.conversationInfo.lastPrompt {
+                    Text("You: " + prompt)
+                        .font(.system(size: 10.5))
+                        .foregroundColor(.white.opacity(0.28))
                         .lineLimit(1)
                 }
             }
-
-            Spacer(minLength: 0)
 
             // Action icons or approval buttons
             if isWaitingForApproval && isInteractiveTool {
@@ -310,7 +381,7 @@ struct InstanceRow: View {
         }
         .padding(.leading, 8)
         .padding(.trailing, 14)
-        .padding(.vertical, 10)
+        .padding(.vertical, 8)
         .contentShape(Rectangle())
         .onTapGesture(count: 2) {
             onChat()
@@ -328,8 +399,12 @@ struct InstanceRow: View {
 
     @ViewBuilder
     private var stateIndicator: some View {
-        switch session.phase {
-        case .processing, .compacting:
+        switch session.group {
+        case .needsYou:
+            Circle()
+                .fill(TerminalColors.amber)
+                .frame(width: 7, height: 7)
+        case .working:
             Text("✳")
                 .font(.system(size: 12, weight: .bold))
                 .foregroundColor(claudeOrange)
@@ -340,28 +415,12 @@ struct InstanceRow: View {
                 )
                 .onAppear { isSpinnerAnimating = true }
                 .onDisappear { isSpinnerAnimating = false }
-        case .waitingForApproval:
-            Text("✳")
-                .font(.system(size: 12, weight: .bold))
-                .foregroundColor(TerminalColors.amber)
-                .rotationEffect(.degrees(isSpinnerAnimating ? 360 : 0))
-                .animation(
-                    .linear(duration: 1.0).repeatForever(autoreverses: false),
-                    value: isSpinnerAnimating
-                )
-                .onAppear { isSpinnerAnimating = true }
-                .onDisappear { isSpinnerAnimating = false }
-        case .waitingForInput:
+        case .idle:
             Circle()
-                .fill(TerminalColors.green)
-                .frame(width: 6, height: 6)
-        case .idle, .ended:
-            Circle()
-                .fill(Color.white.opacity(0.2))
-                .frame(width: 6, height: 6)
+                .strokeBorder(Color.white.opacity(0.3), lineWidth: 1)
+                .frame(width: 7, height: 7)
         }
     }
-
 }
 
 // MARK: - Inline Approval Buttons

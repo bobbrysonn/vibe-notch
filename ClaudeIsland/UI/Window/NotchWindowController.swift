@@ -87,6 +87,13 @@ class NotchWindowController: NSWindowController {
                 case .closed, .popping:
                     // Ignore mouse events when closed so clicks pass through
                     notchWindow?.ignoresMouseEvents = true
+                    // A nonactivating panel stays key even after another app activates, so
+                    // keys typed after closing landed here and beeped. Ordering it out drops
+                    // key status; orderFrontRegardless shows it again without making it key.
+                    if let window = notchWindow, window.isKeyWindow {
+                        window.orderOut(nil)
+                        window.orderFrontRegardless()
+                    }
                 }
             }
             .store(in: &cancellables)

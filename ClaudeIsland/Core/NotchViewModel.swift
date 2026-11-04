@@ -184,9 +184,13 @@ class NotchViewModel: ObservableObject {
         case .opened:
             // A click outside the panel or on the notch closes it; the click is
             // consumed, like a popover's. An open chat is saved and restored on reopen.
-            if geometry.isPointOutsidePanel(location, size: openedSize)
-                || geometry.notchScreenRect.contains(location) {
+            if geometry.isPointOutsidePanel(location, size: openedSize) {
                 notchClose()
+            } else if geometry.notchScreenRect.contains(location) {
+                notchClose()
+                // Opening by click activated this app; hand activation back so typing
+                // goes to the app the user was in. (A click outside activates its target.)
+                NSApp.deactivate()
             }
         case .closed, .popping:
             if geometry.isPointInNotch(location) {

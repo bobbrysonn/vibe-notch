@@ -42,7 +42,7 @@ actor GhosttyFocuser {
             let activated = NSRunningApplication.runningApplications(withBundleIdentifier: Self.ghosttyBundleId)
                 .first?.activate(from: .current, options: []) ?? false
             let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "none"
-            logger.notice("Ghostty activation accepted: \(activated), frontmost: \(front, privacy: .public)")
+            logger.notice("Ghostty activation accepted: \(activated), frontmost: \(front, privacy: .public), our key window: \(NSApp.keyWindow != nil)")
         }
     }
 

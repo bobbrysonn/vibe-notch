@@ -28,6 +28,10 @@ actor SessionStore {
     /// processFileUpdate writes back a session copy taken before its awaits, which would drop it.
     private var subagentToolsCache: [String: (modified: Date, tools: [SubagentToolCall])] = [:]
 
+    /// Subagent parses in progress, keyed like subagentToolsCache. Overlapping processFileUpdate
+    /// passes for a session all miss the cache before the first parse finishes; they share this one.
+    private var subagentParsesInFlight: [String: Task<[SubagentToolInfo], Never>] = [:]
+
     /// Pending file syncs (debounced)
     private var pendingSyncs: [String: Task<Void, Never>] = [:]
 
@@ -722,6 +726,7 @@ actor SessionStore {
 
     private func dropSubagentToolsCache(for sessionId: String) {
         subagentToolsCache = subagentToolsCache.filter { !$0.key.hasPrefix(sessionId + "/") }
+        subagentParsesInFlight = subagentParsesInFlight.filter { !$0.key.hasPrefix(sessionId + "/") }
     }
 
     /// Populate subagent tools for Task/Agent tools using their agent JSONL files
@@ -758,7 +763,7 @@ actor SessionStore {
             if let agentFileDate,
                let cached = subagentToolsCache[cacheKey],
                cached.modified == agentFileDate {
-                if tool.subagentTools.isEmpty {
+                if tool.subagentTools.isEmpty && !cached.tools.isEmpty {
                     tool.subagentTools = cached.tools
                     session.chatItems[i] = ChatHistoryItem(
                         id: taskToolId,
@@ -769,15 +774,25 @@ actor SessionStore {
                 continue
             }
 
-            let subagentToolInfos = await ConversationParser.shared.parseSubagentTools(
-                sessionId: sessionId,
-                agentId: taskResult.agentId,
-                cwd: cwd
-            )
+            let subagentToolInfos: [SubagentToolInfo]
+            let didParse: Bool
+            if let inFlight = subagentParsesInFlight[cacheKey] {
+                subagentToolInfos = await inFlight.value
+                didParse = false
+            } else {
+                let agentId = taskResult.agentId
+                let parse = Task {
+                    await ConversationParser.shared.parseSubagentTools(sessionId: sessionId, agentId: agentId, cwd: cwd)
+                }
+                subagentParsesInFlight[cacheKey] = parse
+                subagentToolInfos = await parse.value
+                if subagentParsesInFlight[cacheKey] == parse {
+                    subagentParsesInFlight[cacheKey] = nil
+                }
+                didParse = true
+            }
 
-            guard !subagentToolInfos.isEmpty else { continue }
-
-            tool.subagentTools = subagentToolInfos.map { info in
+            let subagentTools = subagentToolInfos.map { info in
                 SubagentToolCall(
                     id: info.id,
                     name: info.name,
@@ -787,17 +802,22 @@ actor SessionStore {
                 )
             }
 
-            if let agentFileDate {
-                subagentToolsCache[cacheKey] = (agentFileDate, tool.subagentTools)
+            if didParse, let agentFileDate {
+                subagentToolsCache[cacheKey] = (agentFileDate, subagentTools)
             }
 
+            guard !subagentTools.isEmpty else { continue }
+
+            tool.subagentTools = subagentTools
             session.chatItems[i] = ChatHistoryItem(
                 id: taskToolId,
                 type: .toolCall(tool),
                 timestamp: session.chatItems[i].timestamp
             )
 
-            Self.logger.debug("Populated \(subagentToolInfos.count) subagent tools for Task \(taskToolId.prefix(12), privacy: .public) from agent \(taskResult.agentId.prefix(8), privacy: .public)")
+            if didParse {
+                Self.logger.debug("Populated \(subagentToolInfos.count) subagent tools for Task \(taskToolId.prefix(12), privacy: .public) from agent \(taskResult.agentId.prefix(8), privacy: .public)")
+            }
         }
     }
 

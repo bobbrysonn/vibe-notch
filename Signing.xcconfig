@@ -1,0 +1,4 @@
+CODE_SIGN_STYLE = Automatic
+DEVELOPMENT_TEAM =
+
+#include? "Local.xcconfig"

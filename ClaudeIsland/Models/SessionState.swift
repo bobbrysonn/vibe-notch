@@ -26,7 +26,16 @@ struct SessionState: Equatable, Identifiable, Sendable {
     // MARK: - State Machine
 
     /// Current phase in the session lifecycle
-    var phase: SessionPhase
+    var phase: SessionPhase {
+        didSet {
+            if Self.stateKey(oldValue) != Self.stateKey(phase) {
+                phaseChangedAt = Date()
+            }
+        }
+    }
+
+    /// When the session entered its current state, for "time in state" display
+    var phaseChangedAt: Date
 
     // MARK: - Chat History
 
@@ -90,6 +99,7 @@ struct SessionState: Equatable, Identifiable, Sendable {
         self.tty = tty
         self.isInTmux = isInTmux
         self.phase = phase
+        self.phaseChangedAt = createdAt
         self.chatItems = chatItems
         self.toolTracker = toolTracker
         self.subagentState = subagentState
@@ -124,9 +134,21 @@ struct SessionState: Equatable, Identifiable, Sendable {
         return sessionId
     }
 
-    /// Display title: summary > first user message > project name
+    /// Display title: user-set name > Claude Code's AI title > summary > first user message > project name
     var displayTitle: String {
-        conversationInfo.summary ?? conversationInfo.firstUserMessage ?? projectName
+        conversationInfo.agentName ?? conversationInfo.aiTitle ?? conversationInfo.summary
+            ?? conversationInfo.firstUserMessage ?? projectName
+    }
+
+    /// Groups phases into the states a user cares about. idle_prompt moves a finished turn from
+    /// waitingForInput to idle about a minute later; that is not a new state.
+    nonisolated static func stateKey(_ phase: SessionPhase) -> String {
+        switch phase {
+        case .waitingForApproval(let ctx): return "approval:\(ctx.receivedAt.timeIntervalSinceReferenceDate)"
+        case .processing, .compacting: return "working"
+        case .waitingForInput, .idle: return "turnEnded"
+        case .ended: return "ended"
+        }
     }
 
     /// Best hint for matching window title

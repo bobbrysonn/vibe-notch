@@ -701,6 +701,14 @@ actor SessionStore {
             structuredResults: payload.structuredResults
         )
 
+        // `session` was copied before the awaits above; hook events may have changed the
+        // phase or the running subagents since, or ended the session.
+        guard let current = sessions[payload.sessionId] else { return }
+        session.phase = current.phase
+        session.phaseChangedAt = current.phaseChangedAt
+        session.subagentState.activeTasks = current.subagentState.activeTasks
+        session.subagentState.taskStack = current.subagentState.taskStack
+
         sessions[payload.sessionId] = session
 
         await emitToolCompletionEvents(

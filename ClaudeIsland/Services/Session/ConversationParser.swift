@@ -40,6 +40,12 @@ struct ConversationInfo: Equatable {
     let firstUserMessage: String?  // Fallback title when no summary
     let lastUserMessageDate: Date?  // Timestamp of last user message (for stable sorting)
     var usage: UsageInfo = UsageInfo()  // Token usage stats
+    var agentName: String? = nil  // Newest user-set session name ("agent-name" record)
+    var aiTitle: String? = nil  // Newest Claude Code generated title ("ai-title" record)
+    var gitBranch: String? = nil
+    var lastPrompt: String? = nil  // The user's newest prompt
+    var lastAssistantFirstLine: String? = nil  // First line of the newest assistant text
+    var lastAssistantQuestion: String? = nil  // Closing question of the newest assistant text, if it ends with one
 }
 
 actor ConversationParser {
@@ -172,12 +178,19 @@ actor ConversationParser {
                 if let message = json["message"] as? [String: Any],
                    let msgContent = message["content"] as? String {
                     if !msgContent.hasPrefix("<command-name>") && !msgContent.hasPrefix("<local-command") && !msgContent.hasPrefix("Caveat:") {
-                        firstUserMessage = Self.truncateMessage(msgContent, maxLength: 50)
+                        firstUserMessage = Self.truncateMessage(Self.stripMarkup(msgContent), maxLength: 50)
                         break
                     }
                 }
             }
         }
+
+        var agentName: String?
+        var aiTitle: String?
+        var gitBranch: String?
+        var lastPrompt: String?
+        var lastUserText: String?
+        var lastAssistantText: String?
 
         var foundLastUserMessage = false
         for line in lines.reversed() {
@@ -187,6 +200,38 @@ actor ConversationParser {
             }
 
             let type = json["type"] as? String
+
+            if agentName == nil, type == "agent-name", let name = json["agentName"] as? String, !name.isEmpty {
+                agentName = name
+            }
+            if aiTitle == nil, type == "ai-title", let title = json["aiTitle"] as? String, !title.isEmpty {
+                aiTitle = title
+            }
+            if lastPrompt == nil, type == "last-prompt", let prompt = json["lastPrompt"] as? String, !prompt.isEmpty {
+                lastPrompt = prompt
+            }
+            if gitBranch == nil, let branch = json["gitBranch"] as? String, !branch.isEmpty {
+                gitBranch = branch
+            }
+            if lastAssistantText == nil, type == "assistant", json["isSidechain"] as? Bool != true,
+               let message = json["message"] as? [String: Any],
+               let contentArray = message["content"] as? [[String: Any]] {
+                for block in contentArray.reversed() {
+                    if block["type"] as? String == "text", let text = block["text"] as? String,
+                       !text.hasPrefix("[Request interrupted by user"),
+                       !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        lastAssistantText = text
+                        break
+                    }
+                }
+            }
+            if lastUserText == nil, type == "user", json["isMeta"] as? Bool != true,
+               let message = json["message"] as? [String: Any],
+               let msgContent = message["content"] as? String,
+               !msgContent.hasPrefix("<command-name>"), !msgContent.hasPrefix("<local-command"),
+               !msgContent.hasPrefix("Caveat:"), !msgContent.hasPrefix("<system-reminder>") {
+                lastUserText = msgContent
+            }
 
             if lastMessage == nil {
                 if type == "user" || type == "assistant" {
@@ -238,10 +283,13 @@ actor ConversationParser {
                 summary = summaryText
             }
 
-            if summary != nil && lastMessage != nil && foundLastUserMessage {
+            if summary != nil && lastMessage != nil && foundLastUserMessage && agentName != nil && aiTitle != nil
+                && gitBranch != nil && lastPrompt != nil && lastAssistantText != nil {
                 break
             }
         }
+
+        let promptText = (lastPrompt ?? lastUserText).map { Self.stripMarkup($0) }
 
         return ConversationInfo(
             summary: summary,
@@ -250,8 +298,51 @@ actor ConversationParser {
             lastToolName: lastToolName,
             firstUserMessage: firstUserMessage,
             lastUserMessageDate: lastUserMessageDate,
-            usage: usage
+            usage: usage,
+            agentName: agentName,
+            aiTitle: aiTitle,
+            gitBranch: gitBranch,
+            lastPrompt: Self.truncateMessage(promptText, maxLength: 120),
+            lastAssistantFirstLine: Self.truncateMessage(lastAssistantText.flatMap(Self.firstLine), maxLength: 120),
+            lastAssistantQuestion: Self.truncateMessage(lastAssistantText.flatMap(Self.closingQuestion), maxLength: 120)
         )
+    }
+
+    /// Remove XML-style tags (e.g. `<pasted_content id="…">`) and collapse whitespace
+    nonisolated static func stripMarkup(_ text: String) -> String {
+        text.replacingOccurrences(of: "<[^<>]+>", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func displayLines(_ text: String) -> [String] {
+        text.components(separatedBy: .newlines)
+            .map { line in
+                line.trimmingCharacters(in: .whitespaces)
+                    .replacingOccurrences(of: "**", with: "")
+                    .replacingOccurrences(of: "`", with: "")
+                    .replacingOccurrences(of: "^(#+|[-*>]|\\d+\\.)\\s+", with: "", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespaces)
+            }
+            .filter { !$0.isEmpty }
+    }
+
+    private static func firstLine(_ text: String) -> String? {
+        displayLines(text).first
+    }
+
+    /// The last sentence of the text's last line, when that line ends with a question mark
+    private static func closingQuestion(_ text: String) -> String? {
+        guard let last = displayLines(text).last, last.hasSuffix("?") else { return nil }
+        let chars = Array(last.dropLast())
+        var index = chars.count - 2
+        while index >= 0 {
+            if ".!?:".contains(chars[index]), chars[index + 1].isWhitespace {
+                return String(chars[(index + 2)...]) + "?"
+            }
+            index -= 1
+        }
+        return last
     }
 
     /// Format tool input for display in instance list
@@ -259,13 +350,25 @@ actor ConversationParser {
         guard let input = input else { return "" }
 
         switch toolName {
-        case "Read", "Write", "Edit":
+        case "Read", "Write", "Edit", "MultiEdit":
             if let filePath = input["file_path"] as? String {
                 return (filePath as NSString).lastPathComponent
             }
+        case "NotebookEdit":
+            if let path = input["notebook_path"] as? String {
+                return (path as NSString).lastPathComponent
+            }
         case "Bash":
+            if let description = input["description"] as? String, !description.isEmpty {
+                return description
+            }
             if let command = input["command"] as? String {
                 return command
+            }
+        case "AskUserQuestion":
+            if let questions = input["questions"] as? [[String: Any]],
+               let question = questions.first?["question"] as? String {
+                return question
             }
         case "Grep":
             if let pattern = input["pattern"] as? String {

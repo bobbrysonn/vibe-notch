@@ -126,13 +126,6 @@ class ClaudeSessionMonitor: ObservableObject {
         }
     }
 
-    /// Archive (remove) a session from the instances list
-    func archiveSession(sessionId: String) {
-        Task {
-            await SessionStore.shared.process(.sessionEnded(sessionId: sessionId))
-        }
-    }
-
     // MARK: - State Update
 
     private func updateFromSessions(_ sessions: [SessionState]) {

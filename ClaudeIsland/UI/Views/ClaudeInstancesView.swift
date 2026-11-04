@@ -67,7 +67,6 @@ struct ClaudeInstancesView: View {
                                 showLastPrompt: showLastPrompt,
                                 onFocus: { focusSession(session) },
                                 onChat: { openChat(session) },
-                                onArchive: { archiveSession(session) },
                                 onApprove: { approveSession(session) },
                                 onReject: { rejectSession(session) }
                             )
@@ -108,10 +107,6 @@ struct ClaudeInstancesView: View {
 
     private func rejectSession(_ session: SessionState) {
         sessionMonitor.denyPermission(sessionId: session.sessionId, reason: nil)
-    }
-
-    private func archiveSession(_ session: SessionState) {
-        sessionMonitor.archiveSession(sessionId: session.sessionId)
     }
 }
 
@@ -265,7 +260,6 @@ struct InstanceRow: View {
     let showLastPrompt: Bool
     let onFocus: () -> Void
     let onChat: () -> Void
-    let onArchive: () -> Void
     let onApprove: () -> Void
     let onReject: () -> Void
 
@@ -355,13 +349,6 @@ struct InstanceRow: View {
             } else {
                 HStack(spacing: 8) {
                     OpenInGhosttyButton(action: onFocus)
-
-                    // Archive button - only for idle or completed sessions
-                    if session.phase == .idle || session.phase == .waitingForInput {
-                        IconButton(icon: "archivebox") {
-                            onArchive()
-                        }
-                    }
                 }
                 .transition(.opacity.combined(with: .scale(scale: 0.9)))
             }

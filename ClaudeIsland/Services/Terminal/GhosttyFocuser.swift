@@ -65,12 +65,14 @@ actor GhosttyFocuser {
     // MARK: - Ghostty
 
     private func listTerminals() -> [Terminal] {
+        // The separator is set outside the tell block: inside it, `tab` names Ghostty's tab class.
         let script = """
+        set sep to character id 9
         set out to ""
         with timeout of 30 seconds
             tell application "Ghostty"
                 repeat with term in terminals
-                    set out to out & (id of term) & tab & (tty of term) & tab & (pid of term) & linefeed
+                    set out to out & (id of term) & sep & (tty of term) & sep & (pid of term) & linefeed
                 end repeat
             end tell
         end timeout

@@ -5,6 +5,7 @@
 //  Brings a session's Ghostty terminal to the front, or opens a tab that reaches it
 //
 
+import AppKit
 import Darwin
 import Foundation
 import os.log
@@ -13,6 +14,7 @@ import os.log
 /// reports its tty and foreground pid and `focus` raises its window, tab and split.
 actor GhosttyFocuser {
     static let shared = GhosttyFocuser()
+    static let ghosttyBundleId = "com.mitchellh.ghostty"
 
     private let logger = Logger(subsystem: "com.claudeisland", category: "Ghostty")
 
@@ -28,10 +30,26 @@ actor GhosttyFocuser {
         let pid: Int?
     }
 
+    /// The click made this app active, and macOS (14+) gives another app keyboard focus only
+    /// when the active app yields it; an AppleScript `activate` alone just raises its windows.
+    func open(sessionId: String, cwd: String, pid: Int?, tty: String?) async {
+        await MainActor.run {
+            NSApp.yieldActivation(toApplicationWithBundleIdentifier: Self.ghosttyBundleId)
+        }
+        route(sessionId: sessionId, cwd: cwd, pid: pid, tty: tty)
+        let logger = self.logger
+        await MainActor.run {
+            let activated = NSRunningApplication.runningApplications(withBundleIdentifier: Self.ghosttyBundleId)
+                .first?.activate(from: .current, options: []) ?? false
+            let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "none"
+            logger.notice("Ghostty activation accepted: \(activated), frontmost: \(front, privacy: .public)")
+        }
+    }
+
     /// `pid` and `tty` are what the hooks reported; `claude agents` is asked first because
     /// it reports the claude process itself. Ghostty reports ttys as /dev/ttysNNN and the
     /// session store keeps them as ttysNNN, so both sides are compared without /dev/.
-    func open(sessionId: String, cwd: String, pid: Int?, tty: String?) async {
+    private func route(sessionId: String, cwd: String, pid: Int?, tty: String?) {
         let agent = agentInfo(sessionId: sessionId)
         let pids = Set([agent?.pid, pid].compactMap { $0 })
         let ttys = Set(([tty] + pids.map(Self.ttyName(ofPid:))).compactMap { $0.map(Self.bareTTY) })

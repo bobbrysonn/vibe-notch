@@ -26,7 +26,7 @@ final class GhosttyTabNames: ObservableObject {
     /// Asking a Ghostty that is not running would launch it, so this does nothing then.
     func refresh() {
         guard !isRefreshing,
-              !NSRunningApplication.runningApplications(withBundleIdentifier: "com.mitchellh.ghostty").isEmpty
+              !NSRunningApplication.runningApplications(withBundleIdentifier: GhosttyFocuser.ghosttyBundleId).isEmpty
         else { return }
         isRefreshing = true
         Task {

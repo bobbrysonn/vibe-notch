@@ -148,12 +148,6 @@ class NotchViewModel: ObservableObject {
             .store(in: &cancellables)
     }
 
-    /// Whether we're in chat mode (sticky behavior)
-    private var isInChatMode: Bool {
-        if case .chat = contentType { return true }
-        return false
-    }
-
     /// The chat session we're viewing (persists across close/open)
     private var currentChatSession: SessionState?
 
@@ -188,16 +182,11 @@ class NotchViewModel: ObservableObject {
 
         switch status {
         case .opened:
-            if geometry.isPointOutsidePanel(location, size: openedSize) {
-                // The dismissing click is consumed, like any macOS popover.
-                // Reposting it would land an extra click in whatever app is
-                // underneath and can move its cursor or change its selection.
+            // A click outside the panel or on the notch closes it; the click is
+            // consumed, like a popover's. An open chat is saved and restored on reopen.
+            if geometry.isPointOutsidePanel(location, size: openedSize)
+                || geometry.notchScreenRect.contains(location) {
                 notchClose()
-            } else if geometry.notchScreenRect.contains(location) {
-                // Clicking notch while opened - only close if NOT in chat mode
-                if !isInChatMode {
-                    notchClose()
-                }
             }
         case .closed, .popping:
             if geometry.isPointInNotch(location) {

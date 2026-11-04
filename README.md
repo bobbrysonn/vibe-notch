@@ -33,11 +33,20 @@
 
 ## Install
 
-Download the latest release or build from source:
+Build from source. Put your signing team in an untracked `Local.xcconfig` at the repo root:
+
+```
+DEVELOPMENT_TEAM = <your team id>
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = Apple Development
+```
 
 ```bash
-xcodebuild -scheme ClaudeIsland -configuration Release build
+xcodebuild -project ClaudeIsland.xcodeproj -scheme ClaudeIsland -configuration Release \
+  -derivedDataPath build -xcconfig Local.xcconfig build
 ```
+
+A stable signing identity keeps macOS permissions (Accessibility, login item) across rebuilds; an ad-hoc build loses them each time.
 
 ## How It Works
 

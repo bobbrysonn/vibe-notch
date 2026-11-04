@@ -273,10 +273,11 @@ struct InstanceRow: View {
         session.phase.isWaitingForApproval
     }
 
-    /// Whether the pending tool requires interactive input (not just approve/deny)
+    /// Whether the pending request must be answered in the terminal: an interactive tool,
+    /// or a request found by reconciliation that no hook socket waits on
     private var isInteractiveTool: Bool {
-        guard let toolName = session.pendingToolName else { return false }
-        return toolName == "AskUserQuestion"
+        guard let permission = session.activePermission else { return false }
+        return permission.toolName == "AskUserQuestion" || !permission.isAnswerable
     }
 
     var body: some View {

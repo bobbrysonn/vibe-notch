@@ -70,6 +70,10 @@ enum SessionEvent: Sendable {
     /// Session has ended
     case sessionEnded(sessionId: String)
 
+    /// Claude Code's own list of live sessions (`claude agents --json`), to repair state
+    /// that hooks never delivered
+    case agentsSnapshot(ClaudeAgentsSnapshot)
+
     /// Request to load initial history from file
     case loadHistory(sessionId: String, cwd: String)
 
@@ -215,6 +219,8 @@ extension SessionEvent: CustomStringConvertible {
             return "subagentStopped(session: \(sessionId.prefix(8)), task: \(taskToolId.prefix(12)))"
         case .agentFileUpdated(let sessionId, let taskToolId, let tools):
             return "agentFileUpdated(session: \(sessionId.prefix(8)), task: \(taskToolId.prefix(12)), tools: \(tools.count))"
+        case .agentsSnapshot(let snapshot):
+            return "agentsSnapshot(sessions: \(snapshot.entries.count))"
         }
     }
 }

@@ -69,7 +69,7 @@ struct ChatView: View {
 
                 // Approval bar, interactive prompt, or Input bar
                 if let tool = approvalTool {
-                    if tool == "AskUserQuestion" {
+                    if tool == "AskUserQuestion" || session.activePermission?.isAnswerable == false {
                         // Interactive tools - show prompt to answer in terminal
                         interactivePromptBar
                             .transition(.asymmetric(

@@ -14,6 +14,9 @@ struct PermissionContext: Sendable {
     let toolName: String
     let toolInput: [String: AnyCodable]?
     let receivedAt: Date
+    /// False when the request was found by reconciling with `claude agents` rather than
+    /// delivered by the PermissionRequest hook: no socket waits for an allow/deny.
+    var isAnswerable: Bool = true
 
     /// Format tool input for display
     var formattedInput: String? {

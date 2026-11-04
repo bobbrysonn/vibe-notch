@@ -89,6 +89,9 @@ actor SessionStore {
         case .sessionEnded(let sessionId):
             await processSessionEnd(sessionId: sessionId)
 
+        case .agentsSnapshot(let snapshot):
+            await processAgentsSnapshot(snapshot)
+
         case .loadHistory(let sessionId, let cwd):
             await loadHistoryFromFile(sessionId: sessionId, cwd: cwd)
 
@@ -1001,6 +1004,132 @@ actor SessionStore {
         cancelPendingSync(sessionId: sessionId)
         await ConversationParser.shared.resetState(for: sessionId)
         dropSubagentToolsCache(for: sessionId)
+    }
+
+    // MARK: - Reconciliation with `claude agents`
+
+    /// A hook-driven change this recent wins over a snapshot taken before it
+    private let hookFreshnessSeconds: TimeInterval = 2
+
+    private func processAgentsSnapshot(_ snapshot: ClaudeAgentsSnapshot) async {
+        let now = Date()
+        var created = 0
+        var reconciled = 0
+
+        for entry in snapshot.entries {
+            guard var session = sessions[entry.sessionId] else {
+                sessions[entry.sessionId] = newSession(from: entry, projectsDir: snapshot.projectsDir)
+                scheduleFileSync(sessionId: entry.sessionId, cwd: entry.cwd)
+                created += 1
+                continue
+            }
+            if session.pid == nil {
+                session.pid = entry.pid
+            }
+            let hookIsFresher = session.phaseChangedAt > snapshot.capturedAt.addingTimeInterval(-hookFreshnessSeconds)
+            if !hookIsFresher,
+               let repaired = repairedPhase(for: session, entry: entry, projectsDir: snapshot.projectsDir) {
+                Self.logger.info("Reconciled \(entry.sessionId.prefix(8), privacy: .public) with claude agents (\(entry.status?.rawValue ?? "?", privacy: .public)): \(String(describing: session.phase), privacy: .public) -> \(String(describing: repaired.phase), privacy: .public)")
+                session.phase = repaired.phase
+                session.phaseChangedAt = repaired.since
+                reconciled += 1
+            }
+            sessions[entry.sessionId] = session
+        }
+
+        let listed = Set(snapshot.entries.map(\.sessionId))
+        var removed = 0
+        for (sessionId, session) in Array(sessions) where !listed.contains(sessionId) {
+            guard now.timeIntervalSince(session.lastActivity) > hookFreshnessSeconds else { continue }
+            if let pid = session.pid, isProcessRunning(pid: pid) { continue }
+            await processSessionEnd(sessionId: sessionId)
+            removed += 1
+        }
+
+        Self.logger.debug("claude agents: \(snapshot.entries.count) live, \(created) added, \(reconciled) reconciled, \(removed) removed")
+    }
+
+    /// A live session the hooks never told us about, e.g. one that was already waiting at launch
+    private func newSession(from entry: ClaudeAgentEntry, projectsDir: String) -> SessionState {
+        let tail = TranscriptTail.read(projectsDir: projectsDir, cwd: entry.cwd, sessionId: entry.sessionId)
+        let tree = ProcessTreeBuilder.shared.buildTree()
+        var session = SessionState(
+            sessionId: entry.sessionId,
+            cwd: entry.cwd,
+            pid: entry.pid,
+            isInTmux: ProcessTreeBuilder.shared.isInTmux(pid: entry.pid, tree: tree)
+        )
+        let since: Date
+        switch entry.status {
+        case .waiting:
+            let waiting = waitingPhase(tail: tail, sessionId: entry.sessionId)
+            session.phase = waiting.phase
+            since = waiting.since
+        case .busy:
+            session.phase = .processing
+            since = tail?.newestTimestamp ?? Date()
+        case .idle, nil:
+            session.phase = .waitingForInput
+            since = tail?.newestTimestamp ?? Date()
+        }
+        // Time in state counts from the transcript, not from when this app noticed
+        session.phaseChangedAt = since
+        Self.logger.info("Added \(entry.sessionId.prefix(8), privacy: .public) from claude agents (\(entry.status?.rawValue ?? "?", privacy: .public)) as \(String(describing: session.phase), privacy: .public)")
+        return session
+    }
+
+    /// The phase claude agents implies when it disagrees with ours, or nil to keep ours
+    private func repairedPhase(
+        for session: SessionState,
+        entry: ClaudeAgentEntry,
+        projectsDir: String
+    ) -> (phase: SessionPhase, since: Date)? {
+        guard let status = entry.status else { return nil }
+        let questionToolOpen = session.toolTracker.inProgress.values.contains { $0.name == "AskUserQuestion" }
+        let isRepair: Bool
+        switch (status, session.phase) {
+        case (_, .ended):
+            isRepair = false
+        case (.busy, .waitingForInput), (.busy, .idle):
+            isRepair = true  // missed UserPromptSubmit
+        case (.busy, .waitingForApproval(let ctx)):
+            isRepair = !ctx.isAnswerable  // answered in the terminal; a hook-backed request stays
+        case (.idle, .processing), (.idle, .waitingForApproval), (.idle, .compacting):
+            isRepair = true  // missed Stop
+        case (.waiting, .processing):
+            isRepair = !questionToolOpen  // an open AskUserQuestion already shows as needing you
+        case (.waiting, .waitingForInput), (.waiting, .idle), (.waiting, .compacting):
+            isRepair = true
+        default:
+            isRepair = false
+        }
+        guard isRepair else { return nil }
+
+        let tail = TranscriptTail.read(projectsDir: projectsDir, cwd: session.cwd, sessionId: session.sessionId)
+        switch status {
+        case .waiting:
+            return waitingPhase(tail: tail, sessionId: session.sessionId)
+        case .busy:
+            return (.processing, tail?.newestTimestamp ?? Date())
+        case .idle:
+            return (.waitingForInput, tail?.newestTimestamp ?? Date())
+        }
+    }
+
+    /// A session claude agents reports as waiting: the newest unanswered tool call is what it
+    /// waits on (AskUserQuestion shows as a question, anything else as a permission). No hook
+    /// socket waits for an answer, so the request is not answerable from the app.
+    private func waitingPhase(tail: TranscriptTail?, sessionId: String) -> (phase: SessionPhase, since: Date) {
+        let pending = tail?.pendingToolUse
+        let receivedAt = pending?.timestamp ?? tail?.newestTimestamp ?? Date()
+        let context = PermissionContext(
+            toolUseId: pending?.id ?? "claude-agents-waiting-\(sessionId)",
+            toolName: pending?.name ?? "AskUserQuestion",
+            toolInput: pending?.input,
+            receivedAt: receivedAt,
+            isAnswerable: false
+        )
+        return (.waitingForApproval(context), receivedAt)
     }
 
     // MARK: - History Loading

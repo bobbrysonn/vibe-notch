@@ -569,7 +569,7 @@ struct AnyCodable: Codable, @unchecked Sendable {
     nonisolated(unsafe) let value: Any
 
     /// Initialize with any value
-    init(_ value: Any) {
+    nonisolated init(_ value: Any) {
         self.value = value
     }
 

@@ -73,9 +73,12 @@ class ClaudeSessionMonitor: ObservableObject {
                 }
             }
         )
+
+        ClaudeAgentsWatcher.shared.start()
     }
 
     func stopMonitoring() {
+        ClaudeAgentsWatcher.shared.stop()
         HookSocketServer.shared.stop()
         Task {
             await SessionStore.shared.stopPeriodicStatusCheck()
@@ -87,7 +90,8 @@ class ClaudeSessionMonitor: ObservableObject {
     func approvePermission(sessionId: String) {
         Task {
             guard let session = await SessionStore.shared.session(for: sessionId),
-                  let permission = session.activePermission else {
+                  let permission = session.activePermission,
+                  permission.isAnswerable else {
                 return
             }
 
@@ -105,7 +109,8 @@ class ClaudeSessionMonitor: ObservableObject {
     func denyPermission(sessionId: String, reason: String?) {
         Task {
             guard let session = await SessionStore.shared.session(for: sessionId),
-                  let permission = session.activePermission else {
+                  let permission = session.activePermission,
+                  permission.isAnswerable else {
                 return
             }
 

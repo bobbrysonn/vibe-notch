@@ -120,11 +120,9 @@ struct HookInstaller {
         }
     }
 
-    /// Runs `claude --version` and parses the result. Returns nil on any
-    /// failure (binary not found, non-zero exit, unparseable output).
-    static func detectClaudeCodeVersion() -> ClaudeCodeVersion? {
-        // Claude Code can land in a few typical spots; try each until we find one
-        let fm = FileManager.default
+    /// The claude binary. The app's launchd PATH lacks the usual install spots,
+    /// so try each until one exists.
+    nonisolated static func claudeExecutablePath() -> String? {
         let candidates = [
             "/usr/local/bin/claude",
             "/opt/homebrew/bin/claude",
@@ -132,7 +130,13 @@ struct HookInstaller {
             NSHomeDirectory() + "/.local/bin/claude",
             "/usr/bin/claude",
         ]
-        guard let claudePath = candidates.first(where: { fm.fileExists(atPath: $0) }) else {
+        return candidates.first { FileManager.default.fileExists(atPath: $0) }
+    }
+
+    /// Runs `claude --version` and parses the result. Returns nil on any
+    /// failure (binary not found, non-zero exit, unparseable output).
+    static func detectClaudeCodeVersion() -> ClaudeCodeVersion? {
+        guard let claudePath = claudeExecutablePath() else {
             return nil
         }
 

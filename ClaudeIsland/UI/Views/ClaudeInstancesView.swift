@@ -82,14 +82,10 @@ struct ClaudeInstancesView: View {
     // MARK: - Actions
 
     private func focusSession(_ session: SessionState) {
-        guard session.isInTmux else { return }
-
         Task {
-            if let pid = session.pid {
-                _ = await YabaiController.shared.focusWindow(forClaudePid: pid)
-            } else {
-                _ = await YabaiController.shared.focusWindow(forWorkingDirectory: session.cwd)
-            }
+            await GhosttyFocuser.shared.open(
+                sessionId: session.sessionId, cwd: session.cwd, pid: session.pid, tty: session.tty
+            )
         }
     }
 
@@ -263,7 +259,6 @@ struct InstanceRow: View {
     let onReject: () -> Void
 
     @State private var isHovered = false
-    @State private var isYabaiAvailable = false
     @State private var isSpinnerAnimating = false
 
     private let claudeOrange = Color(red: 0.85, green: 0.47, blue: 0.34)
@@ -334,41 +329,21 @@ struct InstanceRow: View {
 
             // Action icons or approval buttons
             if isWaitingForApproval && isInteractiveTool {
-                // Interactive tools like AskUserQuestion - show chat + terminal buttons
+                // Interactive tools like AskUserQuestion are answered in the terminal
                 HStack(spacing: 8) {
-                    IconButton(icon: "bubble.left") {
-                        onChat()
-                    }
-
-                    // Go to Terminal button (only if yabai available)
-                    if isYabaiAvailable {
-                        TerminalButton(
-                            isEnabled: session.isInTmux,
-                            onTap: { onFocus() }
-                        )
-                    }
+                    OpenInGhosttyButton(action: onFocus)
                 }
                 .transition(.opacity.combined(with: .scale(scale: 0.9)))
             } else if isWaitingForApproval {
                 InlineApprovalButtons(
-                    onChat: onChat,
+                    onFocus: onFocus,
                     onApprove: onApprove,
                     onReject: onReject
                 )
                 .transition(.opacity.combined(with: .scale(scale: 0.9)))
             } else {
                 HStack(spacing: 8) {
-                    // Chat icon - always show
-                    IconButton(icon: "bubble.left") {
-                        onChat()
-                    }
-
-                    // Focus icon (only for tmux instances with yabai)
-                    if session.isInTmux && isYabaiAvailable {
-                        IconButton(icon: "eye") {
-                            onFocus()
-                        }
-                    }
+                    OpenInGhosttyButton(action: onFocus)
 
                     // Archive button - only for idle or completed sessions
                     if session.phase == .idle || session.phase == .waitingForInput {
@@ -393,9 +368,6 @@ struct InstanceRow: View {
                 .fill(isHovered ? Color.white.opacity(0.06) : Color.clear)
         )
         .onHover { isHovered = $0 }
-        .task {
-            isYabaiAvailable = await WindowFinder.shared.isYabaiAvailable()
-        }
     }
 
     @ViewBuilder
@@ -424,11 +396,23 @@ struct InstanceRow: View {
     }
 }
 
+// MARK: - Open in Ghostty
+
+/// Brings the session's Ghostty terminal to the front (or opens a tab that reaches it)
+struct OpenInGhosttyButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        IconButton(icon: "arrow.up.right", action: action)
+            .help("Open in Ghostty")
+    }
+}
+
 // MARK: - Inline Approval Buttons
 
 /// Compact inline approval buttons with staggered animation
 struct InlineApprovalButtons: View {
-    let onChat: () -> Void
+    let onFocus: () -> Void
     let onApprove: () -> Void
     let onReject: () -> Void
 
@@ -438,10 +422,7 @@ struct InlineApprovalButtons: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            // Chat button
-            IconButton(icon: "bubble.left") {
-                onChat()
-            }
+            OpenInGhosttyButton(action: onFocus)
             .opacity(showChatButton ? 1 : 0)
             .scaleEffect(showChatButton ? 1 : 0.8)
 
@@ -515,58 +496,4 @@ struct IconButton: View {
     }
 }
 
-// MARK: - Compact Terminal Button (inline in description)
 
-struct CompactTerminalButton: View {
-    let isEnabled: Bool
-    let onTap: () -> Void
-
-    var body: some View {
-        Button {
-            if isEnabled {
-                onTap()
-            }
-        } label: {
-            HStack(spacing: 2) {
-                Image(systemName: "terminal")
-                    .font(.system(size: 8, weight: .medium))
-                Text("Go to Terminal")
-                    .font(.system(size: 10, weight: .medium))
-            }
-            .foregroundColor(isEnabled ? .white.opacity(0.9) : .white.opacity(0.3))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(isEnabled ? Color.white.opacity(0.15) : Color.white.opacity(0.05))
-            .clipShape(Capsule())
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-// MARK: - Terminal Button
-
-struct TerminalButton: View {
-    let isEnabled: Bool
-    let onTap: () -> Void
-
-    var body: some View {
-        Button {
-            if isEnabled {
-                onTap()
-            }
-        } label: {
-            HStack(spacing: 3) {
-                Image(systemName: "terminal")
-                    .font(.system(size: 9, weight: .medium))
-                Text("Terminal")
-                    .font(.system(size: 11, weight: .medium))
-            }
-            .foregroundColor(isEnabled ? .black : .white.opacity(0.4))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(isEnabled ? Color.white.opacity(0.95) : Color.white.opacity(0.1))
-            .clipShape(Capsule())
-        }
-        .buttonStyle(.plain)
-    }
-}

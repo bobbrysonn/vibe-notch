@@ -9,6 +9,7 @@ import SwiftUI
 
 struct ClaudeInstancesView: View {
     @ObservedObject var sessionMonitor: ClaudeSessionMonitor
+    @ObservedObject private var tabNames = GhosttyTabNames.shared
     @ObservedObject var viewModel: NotchViewModel
 
     var body: some View {
@@ -61,6 +62,7 @@ struct ClaudeInstancesView: View {
                         ForEach(section.sessions) { session in
                             InstanceRow(
                                 session: session,
+                                title: tabNames.title(for: session) ?? session.displayTitle,
                                 now: context.date,
                                 showLastPrompt: showLastPrompt,
                                 onFocus: { focusSession(session) },
@@ -77,11 +79,18 @@ struct ClaudeInstancesView: View {
             }
             .scrollBounceBehavior(.basedOnSize)
         }
+        .task {
+            while !Task.isCancelled {
+                tabNames.refresh()
+                try? await Task.sleep(for: .seconds(10))
+            }
+        }
     }
 
     // MARK: - Actions
 
     private func focusSession(_ session: SessionState) {
+        viewModel.notchClose()
         Task {
             await GhosttyFocuser.shared.open(
                 sessionId: session.sessionId, cwd: session.cwd, pid: session.pid, tty: session.tty
@@ -250,6 +259,8 @@ struct SessionSectionHeader: View {
 
 struct InstanceRow: View {
     let session: SessionState
+    /// The Ghostty tab name the user set, else the session's own title
+    let title: String
     let now: Date
     let showLastPrompt: Bool
     let onFocus: () -> Void
@@ -284,7 +295,7 @@ struct InstanceRow: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text(session.displayTitle)
+                    Text(title)
                         .font(.system(size: 13, weight: .medium))
                         .foregroundColor(.white)
                         .lineLimit(1)

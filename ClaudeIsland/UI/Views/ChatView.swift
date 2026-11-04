@@ -13,6 +13,7 @@ struct ChatView: View {
     let initialSession: SessionState
     let sessionMonitor: ClaudeSessionMonitor
     @ObservedObject var viewModel: NotchViewModel
+    @ObservedObject private var tabNames = GhosttyTabNames.shared
 
     @State private var inputText: String = ""
     @State private var history: [ChatHistoryItem] = []
@@ -191,7 +192,7 @@ struct ChatView: View {
                     .foregroundColor(.white.opacity(isHeaderHovered ? 1.0 : 0.6))
                     .frame(width: 24, height: 24)
 
-                Text(session.displayTitle)
+                Text(tabNames.title(for: session) ?? session.displayTitle)
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundColor(.white.opacity(isHeaderHovered ? 1.0 : 0.85))
                     .lineLimit(1)
@@ -444,6 +445,7 @@ struct ChatView: View {
     // MARK: - Actions
 
     private func focusTerminal() {
+        viewModel.notchClose()
         Task {
             await GhosttyFocuser.shared.open(
                 sessionId: session.sessionId, cwd: session.cwd, pid: session.pid, tty: session.tty

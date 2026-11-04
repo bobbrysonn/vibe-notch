@@ -62,6 +62,36 @@ actor GhosttyFocuser {
         tty.hasPrefix("/dev/") ? String(tty.dropFirst(5)) : tty
     }
 
+    /// Tab titles the user set in Ghostty (a tab's `name override`), one entry per terminal in
+    /// a renamed tab: (bare tty, foreground pid, name).
+    func tabNameOverrides() -> [(tty: String, pid: Int, name: String)] {
+        let script = """
+        set sep to character id 9
+        set out to ""
+        with timeout of 10 seconds
+            tell application "Ghostty"
+                repeat with w in windows
+                    repeat with t in tabs of w
+                        set tabTitle to name override of t
+                        if tabTitle is not "" then
+                            repeat with term in terminals of t
+                                set out to out & (tty of term) & sep & (pid of term) & sep & tabTitle & linefeed
+                            end repeat
+                        end if
+                    end repeat
+                end repeat
+            end tell
+        end timeout
+        return out
+        """
+        guard let output = runAppleScript(script, arguments: []) else { return [] }
+        return output.split(separator: "\n").compactMap { line in
+            let fields = line.split(separator: "\t", maxSplits: 2, omittingEmptySubsequences: false)
+            guard fields.count == 3, let pid = Int(fields[1]), !fields[2].isEmpty else { return nil }
+            return (Self.bareTTY(String(fields[0])), pid, String(fields[2]))
+        }
+    }
+
     // MARK: - Ghostty
 
     private func listTerminals() -> [Terminal] {

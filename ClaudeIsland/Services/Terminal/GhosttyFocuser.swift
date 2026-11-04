@@ -25,30 +25,41 @@ actor GhosttyFocuser {
     private struct AgentInfo {
         let kind: String?
         let shortId: String?
+        let pid: Int?
     }
 
+    /// `pid` and `tty` are what the hooks reported; `claude agents` is asked first because
+    /// it reports the claude process itself. Ghostty reports ttys as /dev/ttysNNN and the
+    /// session store keeps them as ttysNNN, so both sides are compared without /dev/.
     func open(sessionId: String, cwd: String, pid: Int?, tty: String?) async {
+        let agent = agentInfo(sessionId: sessionId)
+        let pids = Set([agent?.pid, pid].compactMap { $0 })
+        let ttys = Set(([tty] + pids.map(Self.ttyName(ofPid:))).compactMap { $0.map(Self.bareTTY) })
         let terminals = listTerminals()
-        let sessionTTY = tty ?? pid.flatMap(Self.ttyPath(ofPid:))
 
-        let match = terminals.first { sessionTTY != nil && $0.tty == sessionTTY }
-            ?? terminals.first { pid != nil && $0.pid == pid }
+        let match = terminals.first { ttys.contains(Self.bareTTY($0.tty)) }
+            ?? terminals.first { pids.contains($0.pid) }
             ?? terminals.first { Self.isAttachClient(pid: $0.pid, sessionId: sessionId) }
+        let label = sessionId.prefix(8)
         if let match {
+            logger.notice("Session \(label, privacy: .public): focusing terminal on \(match.tty, privacy: .public)")
             focus(terminalId: match.id)
             return
         }
 
-        let agent = agentInfo(sessionId: sessionId)
+        logger.notice("Session \(label, privacy: .public): no match among \(terminals.count) terminals for ttys \(String(describing: ttys.sorted()), privacy: .public) pids \(String(describing: pids.sorted()), privacy: .public)")
         if let agent, agent.kind == "background", let shortId = agent.shortId {
             openTab(cwd: cwd, command: "claude attach \(shortId)")
-        } else if agent != nil || pid.map(Self.isAlive) == true {
+        } else if agent != nil || pids.contains(where: Self.isAlive) {
             // Running but shown in no Ghostty terminal; resuming would start a second copy.
-            logger.info("Session \(sessionId.prefix(8), privacy: .public) is in no Ghostty terminal; activating Ghostty")
             runAppleScript("tell application \"Ghostty\" to activate", arguments: [])
         } else {
             openTab(cwd: cwd, command: "claude --resume \(sessionId)")
         }
+    }
+
+    private static func bareTTY(_ tty: String) -> String {
+        tty.hasPrefix("/dev/") ? String(tty.dropFirst(5)) : tty
     }
 
     // MARK: - Ghostty
@@ -56,7 +67,7 @@ actor GhosttyFocuser {
     private func listTerminals() -> [Terminal] {
         let script = """
         set out to ""
-        with timeout of 5 seconds
+        with timeout of 30 seconds
             tell application "Ghostty"
                 repeat with term in terminals
                     set out to out & (id of term) & tab & (tty of term) & tab & (pid of term) & linefeed
@@ -147,14 +158,14 @@ actor GhosttyFocuser {
               let entry = entries.first(where: { $0["sessionId"] as? String == sessionId }) else {
             return nil
         }
-        return AgentInfo(kind: entry["kind"] as? String, shortId: entry["id"] as? String)
+        return AgentInfo(kind: entry["kind"] as? String, shortId: entry["id"] as? String, pid: entry["pid"] as? Int)
     }
 
-    private static func ttyPath(ofPid pid: Int) -> String? {
+    private static func ttyName(ofPid pid: Int) -> String? {
         guard let tty = run("/bin/ps", ["-o", "tty=", "-p", String(pid)])?
             .trimmingCharacters(in: .whitespacesAndNewlines),
               !tty.isEmpty, tty != "??" else { return nil }
-        return "/dev/" + tty
+        return tty
     }
 
     /// A terminal running `claude attach <id>` for this session (the id is a session-id prefix)

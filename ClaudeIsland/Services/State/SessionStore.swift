@@ -23,6 +23,11 @@ actor SessionStore {
     /// All sessions keyed by sessionId
     private var sessions: [String: SessionState] = [:]
 
+    /// Parsed subagent tools per agent JSONL with the file's modification date at parse time,
+    /// keyed by "sessionId/agentId". Held on the actor rather than in SessionState because
+    /// processFileUpdate writes back a session copy taken before its awaits, which would drop it.
+    private var subagentToolsCache: [String: (modified: Date, tools: [SubagentToolCall])] = [:]
+
     /// Pending file syncs (debounced)
     private var pendingSyncs: [String: Task<Void, Never>] = [:]
 
@@ -138,6 +143,7 @@ actor SessionStore {
             sessions.removeValue(forKey: sessionId)
             cancelPendingSync(sessionId: sessionId)
             await ConversationParser.shared.resetState(for: sessionId)
+            dropSubagentToolsCache(for: sessionId)
             return
         }
 
@@ -706,6 +712,10 @@ actor SessionStore {
         )
     }
 
+    private func dropSubagentToolsCache(for sessionId: String) {
+        subagentToolsCache = subagentToolsCache.filter { !$0.key.hasPrefix(sessionId + "/") }
+    }
+
     /// Populate subagent tools for Task/Agent tools using their agent JSONL files
     private func populateSubagentToolsFromAgentFiles(
         sessionId: String,
@@ -729,6 +739,28 @@ actor SessionStore {
                 session.subagentState.agentDescriptions[taskResult.agentId] = description
             }
 
+            // Every session file update reaches here; re-reading each finished agent's
+            // whole JSONL on every update pinned a core for sessions with many agents.
+            let cacheKey = "\(sessionId)/\(taskResult.agentId)"
+            let agentFileDate = ConversationParser.subagentFileModificationDate(
+                sessionId: sessionId,
+                agentId: taskResult.agentId,
+                cwd: cwd
+            )
+            if let agentFileDate,
+               let cached = subagentToolsCache[cacheKey],
+               cached.modified == agentFileDate {
+                if tool.subagentTools.isEmpty {
+                    tool.subagentTools = cached.tools
+                    session.chatItems[i] = ChatHistoryItem(
+                        id: taskToolId,
+                        type: .toolCall(tool),
+                        timestamp: session.chatItems[i].timestamp
+                    )
+                }
+                continue
+            }
+
             let subagentToolInfos = await ConversationParser.shared.parseSubagentTools(
                 sessionId: sessionId,
                 agentId: taskResult.agentId,
@@ -745,6 +777,10 @@ actor SessionStore {
                     status: info.isCompleted ? .success : .running,
                     timestamp: parseTimestamp(info.timestamp) ?? Date()
                 )
+            }
+
+            if let agentFileDate {
+                subagentToolsCache[cacheKey] = (agentFileDate, tool.subagentTools)
             }
 
             session.chatItems[i] = ChatHistoryItem(
@@ -936,6 +972,7 @@ actor SessionStore {
         sessions.removeValue(forKey: sessionId)
         cancelPendingSync(sessionId: sessionId)
         await ConversationParser.shared.resetState(for: sessionId)
+        dropSubagentToolsCache(for: sessionId)
     }
 
     // MARK: - History Loading
@@ -1085,6 +1122,7 @@ actor SessionStore {
                 sessions.removeValue(forKey: sessionId)
                 cancelPendingSync(sessionId: sessionId)
                 await ConversationParser.shared.resetState(for: sessionId)
+                dropSubagentToolsCache(for: sessionId)
                 removedSession = true
                 continue
             }
@@ -1096,6 +1134,7 @@ actor SessionStore {
                     sessions.removeValue(forKey: sessionId)
                     cancelPendingSync(sessionId: sessionId)
                     await ConversationParser.shared.resetState(for: sessionId)
+                    dropSubagentToolsCache(for: sessionId)
                     removedSession = true
                     continue
                 }

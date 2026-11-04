@@ -535,6 +535,12 @@ actor ConversationParser {
         return nested
     }
 
+    nonisolated static func subagentFileModificationDate(sessionId: String, agentId: String, cwd: String) -> Date? {
+        let projectDir = cwd.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
+        let path = subagentFilePath(sessionId: sessionId, agentId: agentId, projectDir: projectDir)
+        return (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+    }
+
     private func parseMessageLine(_ json: [String: Any], seenToolIds: inout Set<String>, toolIdToName: inout [String: String]) -> ChatMessage? {
         guard let type = json["type"] as? String,
               let uuid = json["uuid"] as? String else {

@@ -6,8 +6,15 @@
 //
 
 import Foundation
+import os.log
+
+private let logger = Logger(subsystem: "com.claudeisland", category: "HookInstaller")
 
 struct HookInstaller {
+
+    private static let settingsWriteOptions: JSONSerialization.WritingOptions = [
+        .prettyPrinted, .sortedKeys, .withoutEscapingSlashes
+    ]
 
     /// Install hook script and update settings.json on app launch
     static func installIfNeeded() {
@@ -33,8 +40,13 @@ struct HookInstaller {
 
     private static func updateSettings(at settingsURL: URL) {
         var json: [String: Any] = [:]
-        if let data = try? Data(contentsOf: settingsURL),
-           let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+        if FileManager.default.fileExists(atPath: settingsURL.path) {
+            // Writing back a fresh object here would wipe every other setting.
+            guard let data = try? Data(contentsOf: settingsURL),
+                  let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                logger.error("Not installing hooks: \(settingsURL.path, privacy: .public) is not a readable JSON object")
+                return
+            }
             json = existing
         }
 
@@ -88,11 +100,8 @@ struct HookInstaller {
 
         json["hooks"] = hooks
 
-        if let data = try? JSONSerialization.data(
-            withJSONObject: json,
-            options: [.prettyPrinted, .sortedKeys]
-        ) {
-            try? data.write(to: settingsURL)
+        if let data = try? JSONSerialization.data(withJSONObject: json, options: settingsWriteOptions) {
+            try? data.write(to: settingsURL, options: .atomic)
         }
     }
 
@@ -274,11 +283,8 @@ struct HookInstaller {
             json["hooks"] = hooks
         }
 
-        if let data = try? JSONSerialization.data(
-            withJSONObject: json,
-            options: [.prettyPrinted, .sortedKeys]
-        ) {
-            try? data.write(to: settings)
+        if let data = try? JSONSerialization.data(withJSONObject: json, options: settingsWriteOptions) {
+            try? data.write(to: settings, options: .atomic)
         }
     }
 
